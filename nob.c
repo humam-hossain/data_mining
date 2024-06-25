@@ -16,8 +16,9 @@ bool build_program(const char *source_path, const char *output_path){
 int main(int argc, char **argv)
 {
     NOB_GO_REBUILD_URSELF(argc, argv);
-    if(!build_program("2d.c", "2d")) return 1;
-    if(!build_program("3d.c", "3d")) return 1;
+    // if(!build_program("2d.c", "2d")) return 1;
+    // if(!build_program("3d.c", "3d")) return 1;
+    if(!build_program("knn.c", "knn")) return 1;
 
     return 0;
 }
