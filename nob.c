@@ -8,7 +8,7 @@ bool build_program(const char *source_path, const char *output_path){
     nob_cmd_append(&cmd, "-Wall", "-Wextra", "-ggdb");
     nob_cmd_append(&cmd, source_path);
     nob_cmd_append(&cmd, "-o", output_path);
-    nob_cmd_append(&cmd, "-lraylib", "-lGL", "-lm", "-lpthread", "-ldl", "-lrt", "-lX11");
+    nob_cmd_append(&cmd, "-lraylib", "-lGL", "-lm", "-lpthread", "-ldl", "-lrt", "-lX11", "-lz");
 
     return nob_cmd_run_sync(cmd);
 }
