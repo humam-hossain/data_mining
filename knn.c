@@ -34,7 +34,6 @@ typedef struct {
 
 Samples parse_samples(Nob_String_View content)
 {
-    size_t klasses[4] = {0};
     size_t lines_count = 0;
     Samples samples = {0};
     for(; content.count > 0; ++lines_count){
@@ -53,7 +52,7 @@ Samples parse_samples(Nob_String_View content)
     return samples;
 }
 
-const char *klass_names[] = {"Class", "Title", "Description"};
+const char *klass_names[] = {"World", "Sports", "Business", "Sci/Tech"};
 
 typedef struct {
     float distance;
@@ -66,11 +65,60 @@ typedef struct {
     size_t capacity;
 } NCDs;
 
-size_t klassify_sample(Samples train, Nob_String_View text)
+float ncd(Nob_String_View a, Nob_String_View b, float cb)
 {
-    assert(0 && "TODO: not implemented");
+    Nob_String_View ab = nob_sv_from_cstr(nob_temp_sprintf(SV_Fmt SV_Fmt, SV_Arg(a), SV_Arg(b)));
+    float ca = deflate_sv(a).count;
+    float cab = deflate_sv(ab).count;
+    float min = ca; if(cb < min) min = cb;
+    float max = ca; if(cb > max) max = cb;
+    
+    return (cab - min)/max;
+}
 
+int compare_ncds(const void *a, const void *b)
+{
+    NCD *na = a;
+    NCD *nb = b;
+
+    if(na->distance < nb->distance) return -1;
+    if(na->distance > nb->distance) return 1;
     return 0;
+}
+
+size_t klassify_sample(Samples train, Nob_String_View text, size_t k)
+{
+    NCDs ncds = {0};
+
+    float cb = deflate_sv(text).count;
+    for(size_t i=0; i<train.count; ++i){
+        float distance = ncd(train.items[i].text, text, cb);
+        nob_temp_reset();
+
+        NCD ncd = {
+            .distance = distance,
+            .klass = train.items[i].klass
+        };
+        nob_da_append(&ncds, ncd);
+        printf("\rClassifying %zu/%zu", i, train.count);
+    }
+    printf("\n");
+
+    qsort(ncds.items, ncds.count, sizeof(*ncds.items), compare_ncds);
+
+    size_t klass_freq[NOB_ARRAY_LEN(klass_names)] = {0};
+    for(size_t i = 0; i < ncds.count && i < k; ++i){
+        klass_freq[ncds.items[i].klass] += 1;
+    }
+
+    size_t predicted_class = 0;
+    for(size_t i=1; i<NOB_ARRAY_LEN(klass_names); ++i){
+        if(klass_freq[i] > klass_freq[predicted_class]){
+            predicted_class = i;
+        }
+    }
+
+    return predicted_class;
 }
 
 int main(int argc, char **argv)
@@ -99,13 +147,17 @@ int main(int argc, char **argv)
     if(!nob_read_entire_file(test_path, &test_content)) return 1;
     Samples test_samples = parse_samples(nob_sv_from_parts(test_content.items, test_content.count));
 
-    Sample sample = test_samples.items[0];
-    size_t predicted_class = klassify_sample(train_samples, sample.text);
+    const char* text = "Operational athletics test weeks before start of Olympic Games in Paris. An operational athletics test was held Tuesday at the Stade de France, just a few weeks before the start of the Olympic Games in Paris. Young athletes from France and abroad gathered to test the facilities for the various athletics events that will take place at the stadium.";
 
-    nob_log(NOB_INFO, "Text: "SV_Fmt, SV_Arg(sample.text));
-    nob_log(NOB_INFO, "Predicted class: %s"SV_Fmt, klass_names[predicted_class]);
-    nob_log(NOB_INFO, "Actual class: "SV_Fmt, klass_names[sample.klass]);
+    size_t predicted_class = klassify_sample(train_samples, nob_sv_from_cstr(text), 2);
+    nob_log(NOB_INFO, "Predicted class: %s", klass_names[predicted_class]);
 
+    // Sample sample = test_samples.items[0];
+    // size_t predicted_class = klassify_sample(train_samples, sample.text, 2);
+
+    // nob_log(NOB_INFO, "Text: "SV_Fmt, SV_Arg(sample.text));
+    // nob_log(NOB_INFO, "Predicted class: %s", klass_names[predicted_class]);
+    // nob_log(NOB_INFO, "Actual class: %s", klass_names[sample.klass]);
 
     return 0;
 }
