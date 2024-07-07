@@ -157,12 +157,79 @@ void *klassify_thread(void *params)
     return NULL;
 }
 
+typedef struct {
+    size_t nprocs;
+    size_t chunk_size;
+    size_t chunk_rem;
+
+    Samples train_samples;
+
+    pthread_t *threads;
+    Klassify_State *states;
+} Klass_Predictor;
+
+void klass_predictor_init(Klass_Predictor *kp, Samples train_samples)
+{
+    kp->nprocs = get_nprocs();
+    kp->chunk_size = train_samples.count/kp->nprocs;
+    kp->chunk_rem = train_samples.count%kp->nprocs;
+    kp->train_samples = train_samples;
+
+    kp->threads = malloc(kp->nprocs*sizeof(pthread_t));
+    assert(kp->threads != NULL);
+    kp->states = malloc(kp->nprocs*sizeof(Klassify_State));
+    assert(kp->states != NULL);
+}
+
+size_t klass_predictor_predict(Klass_Predictor *kp, const char *text)
+{
+    memset(kp->states, 0, kp->nprocs*sizeof(Klassify_State));
+    for(size_t i=0; i<kp->nprocs; ++i){
+        kp->states[i].train = kp->train_samples.items + i*kp->chunk_size;
+        kp->states[i].train_count = kp->chunk_size;
+        if(i == kp->nprocs - 1) kp->states[i].train_count += kp->chunk_rem;
+        kp->states[i].text = nob_sv_from_cstr(text);
+        if(pthread_create(&kp->threads[i], NULL, klassify_thread, &kp->states[i]) != 0){
+            nob_log(NOB_ERROR, "Could no create thread!");
+            return 1;
+        }
+    }
+
+    for(size_t i=0; i<kp->nprocs; ++i){
+        if(pthread_join(kp->threads[i], NULL) != 0){
+            nob_log(NOB_ERROR, "Could not join thread");
+            return 1;
+        }
+    }
+
+    size_t klass_freq[NOB_ARRAY_LEN(klass_names)] = {0};
+    for(size_t i=0; i<kp->nprocs; ++i){
+        klass_freq[kp->states[i].ncds.items[0].klass] += 1;
+    }
+
+    size_t predicted_klass = 0;
+    for(size_t i=1; i<NOB_ARRAY_LEN(klass_names); ++i){
+        if(klass_freq[predicted_klass] < klass_freq[i]){
+            predicted_klass = i;
+        }
+    }
+
+    return predicted_klass;
+}
+
+void usage(const char *program)
+{
+    nob_log(NOB_ERROR, "Usage: %s <train.csv> <test.csv>", program);
+}
+
+char buffer[512];
+
 int main(int argc, char **argv)
 {
     const char *program = nob_shift_args(&argc, &argv);
 
     if(argc <= 0){
-        nob_log(NOB_ERROR, "Usage: %s <train.csv> <test.csv>", program);
+        usage(program);
         nob_log(NOB_ERROR, "ERROR: no train dataset is provided");
         return 1;
     }
@@ -183,50 +250,23 @@ int main(int argc, char **argv)
     if(!nob_read_entire_file(test_path, &test_content)) return 1;
     Samples test_samples = parse_samples(nob_sv_from_parts(test_content.items, test_content.count));
 
-    const char* text = "Operational athletics test weeks before start of Olympic Games in Paris. An operational athletics test was held Tuesday at the Stade de France, just a few weeks before the start of the Olympic Games in Paris. Young athletes from France and abroad gathered to test the facilities for the various athletics events that will take place at the stadium.";
+    // const char* text = "Operational athletics test weeks before start of Olympic Games in Paris. An operational athletics test was held Tuesday at the Stade de France, just a few weeks before the start of the Olympic Games in Paris. Young athletes from France and abroad gathered to test the facilities for the various athletics events that will take place at the stadium.";
 
-    size_t nprocs = get_nprocs();
-    size_t chunk_size = train_samples.count/nprocs;
-    size_t chunk_rem = train_samples.count%nprocs;
+    // const char* text = "How ‘lab-grown’ meat cultivated from animal cells could offer another sustainable food option. Meat cultivated from cells — with no need to raise and slaughter an animal — is starting to show up in restaurants around the world. But can it be made cheaply enough to displace animal agriculture?";
 
-    pthread_t *threads = malloc(nprocs*sizeof(pthread_t));
-    assert(threads != NULL);
-    Klassify_State *states = malloc(nprocs*sizeof(Klassify_State));
-    assert(states != NULL);
-    memset(states, 0, nprocs*sizeof(Klassify_State));
+    // const char* text = "Scammers are swiping billions from Americans every year. Worse, most crooks are getting away with it. Sophisticated overseas criminals are stealing tens of billions of dollars from Americans every year, a crime wave projected to get worse as the U.S. population ages and technology makes it easier to successfully perpetrate fraud.";
 
-    for(size_t i=0; i<nprocs; ++i){
-        states[i].train = train_samples.items + i*chunk_size;
-        states[i].train_count = chunk_size;
-        if(i == nprocs - 1)states[i].train_count += chunk_rem;
-        states[i].text = nob_sv_from_cstr(text);
-        if(pthread_create(&threads[i], NULL, klassify_thread, &states[i]) != 0){
-            nob_log(NOB_ERROR, "Could no create thread!");
-            return 1;
-        }
+    Klass_Predictor kp = {0};
+    klass_predictor_init(&kp, train_samples);
+
+    while(true){
+        printf("Provide News Title\n");
+        fgets(buffer, sizeof(buffer), stdin);
+
+        size_t predicted_klass = klass_predictor_predict(&kp, buffer);
+        printf("Topic: %s\n\n", klass_names[predicted_klass]);
+
     }
-
-    for(size_t i=0; i<nprocs; ++i){
-        if(pthread_join(threads[i], NULL) != 0){
-            nob_log(NOB_ERROR, "Could not join thread");
-            return 1;
-        }
-    }
-
-    size_t klass_freq[NOB_ARRAY_LEN(klass_names)] = {0};
-    for(size_t i=0; i<nprocs; ++i){
-        klass_freq[states[i].ncds.items[0].klass] += 1;
-    }
-
-    size_t predicted_klass = 0;
-    for(size_t i=1; i<NOB_ARRAY_LEN(klass_names); ++i){
-        if(klass_freq[predicted_klass] < klass_freq[i]){
-            predicted_klass = i;
-        }
-    }
-
-    nob_log(NOB_INFO, "Text: %s", text);
-    nob_log(NOB_INFO, "Klass: %s", klass_names[predicted_klass]);
 
     return 0;
 }
