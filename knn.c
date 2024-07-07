@@ -1,12 +1,16 @@
 #include <stdio.h>
 #include <zlib.h>
+#include <sys/sysinfo.h>
+#include <pthread.h>
 
 #define NOB_IMPLEMENTATION
 #include "nob.h"
+#define ARENA_IMPLEMENTATION
+#include "arena.h"
 
-Nob_String_View deflate_sv(Nob_String_View sv)
+Nob_String_View deflate_sv(Arena *arena, Nob_String_View sv)
 {
-    void *output = nob_temp_alloc(sv.count*2);
+    void *output = arena_alloc(arena, sv.count*2);
 
     z_stream defstream = {0};
     defstream.avail_in = (uInt)sv.count;
@@ -65,11 +69,11 @@ typedef struct {
     size_t capacity;
 } NCDs;
 
-float ncd(Nob_String_View a, Nob_String_View b, float cb)
+float ncd(Arena *arena, Nob_String_View a, Nob_String_View b, float cb)
 {
-    Nob_String_View ab = nob_sv_from_cstr(nob_temp_sprintf(SV_Fmt SV_Fmt, SV_Arg(a), SV_Arg(b)));
-    float ca = deflate_sv(a).count;
-    float cab = deflate_sv(ab).count;
+    Nob_String_View ab = nob_sv_from_cstr(arena_sprintf(arena, SV_Fmt SV_Fmt, SV_Arg(a), SV_Arg(b)));
+    float ca = deflate_sv(arena, a).count;
+    float cab = deflate_sv(arena, ab).count;
     float min = ca; if(cb < min) min = cb;
     float max = ca; if(cb > max) max = cb;
     
@@ -86,39 +90,71 @@ int compare_ncds(const void *a, const void *b)
     return 0;
 }
 
-size_t klassify_sample(Samples train, Nob_String_View text, size_t k)
-{
-    NCDs ncds = {0};
+// size_t klassify_sample(Sample *train, size_t train_count, Nob_String_View text, size_t k)
+// {
+//     NCDs ncds = {0};
 
-    float cb = deflate_sv(text).count;
-    for(size_t i=0; i<train.count; ++i){
-        float distance = ncd(train.items[i].text, text, cb);
-        nob_temp_reset();
+//     float cb = deflate_sv(text).count;
+//     for(size_t i=0; i<train_count; ++i){
+//         float distance = ncd(train[i].text, text, cb);
+//         nob_temp_reset();
+
+//         NCD ncd = {
+//             .distance = distance,
+//             .klass = train[i].klass
+//         };
+//         nob_da_append(&ncds, ncd);
+//         printf("\rClassifying %zu/%zu", i, train_count);
+//     }
+//     printf("\n");
+
+//     qsort(ncds.items, ncds.count, sizeof(*ncds.items), compare_ncds);
+
+//     size_t klass_freq[NOB_ARRAY_LEN(klass_names)] = {0};
+//     for(size_t i = 0; i < ncds.count && i < k; ++i){
+//         klass_freq[ncds.items[i].klass] += 1;
+//     }
+
+//     size_t predicted_class = 0;
+//     for(size_t i=1; i<NOB_ARRAY_LEN(klass_names); ++i){
+//         if(klass_freq[i] > klass_freq[predicted_class]){
+//             predicted_class = i;
+//         }
+//     }
+
+//     return predicted_class;
+// }
+
+typedef struct {
+    Sample *train;
+    size_t train_count;
+    Nob_String_View text;
+
+    NCDs ncds;
+    Arena arena;
+    int count;
+} Klassify_State;
+
+void *klassify_thread(void *params)
+{
+    Klassify_State *state = params;
+
+    float cb = deflate_sv(&state->arena, state->text).count;
+    for(size_t i=0; i<state->train_count; ++i){
+        float distance = ncd(&state->arena, state->train[i].text, state->text, cb);
+        arena_reset(&state->arena);
 
         NCD ncd = {
             .distance = distance,
-            .klass = train.items[i].klass
+            .klass = state->train[i].klass
         };
-        nob_da_append(&ncds, ncd);
-        printf("\rClassifying %zu/%zu", i, train.count);
-    }
-    printf("\n");
-
-    qsort(ncds.items, ncds.count, sizeof(*ncds.items), compare_ncds);
-
-    size_t klass_freq[NOB_ARRAY_LEN(klass_names)] = {0};
-    for(size_t i = 0; i < ncds.count && i < k; ++i){
-        klass_freq[ncds.items[i].klass] += 1;
+        nob_da_append(&state->ncds, ncd);
+        state->count += 1;
     }
 
-    size_t predicted_class = 0;
-    for(size_t i=1; i<NOB_ARRAY_LEN(klass_names); ++i){
-        if(klass_freq[i] > klass_freq[predicted_class]){
-            predicted_class = i;
-        }
-    }
+    qsort(state->ncds.items, state->ncds.count, sizeof(*state->ncds.items), compare_ncds);
 
-    return predicted_class;
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -126,7 +162,7 @@ int main(int argc, char **argv)
     const char *program = nob_shift_args(&argc, &argv);
 
     if(argc <= 0){
-        nob_log(NOB_ERROR, "Usage: %s <input.csv> <test.csv>", program);
+        nob_log(NOB_ERROR, "Usage: %s <train.csv> <test.csv>", program);
         nob_log(NOB_ERROR, "ERROR: no train dataset is provided");
         return 1;
     }
@@ -137,7 +173,7 @@ int main(int argc, char **argv)
     Samples train_samples = parse_samples(nob_sv_from_parts(train_content.items, train_content.count));
 
     if(argc <= 0){
-        nob_log(NOB_ERROR, "Usage: %s <input.csv> <test.csv>", program);
+        nob_log(NOB_ERROR, "Usage: %s <train.csv> <test.csv>", program);
         nob_log(NOB_ERROR, "ERROR: no test dataset is provided");
         return 1;
     }
@@ -149,15 +185,48 @@ int main(int argc, char **argv)
 
     const char* text = "Operational athletics test weeks before start of Olympic Games in Paris. An operational athletics test was held Tuesday at the Stade de France, just a few weeks before the start of the Olympic Games in Paris. Young athletes from France and abroad gathered to test the facilities for the various athletics events that will take place at the stadium.";
 
-    size_t predicted_class = klassify_sample(train_samples, nob_sv_from_cstr(text), 2);
-    nob_log(NOB_INFO, "Predicted class: %s", klass_names[predicted_class]);
+    size_t nprocs = get_nprocs();
+    size_t chunk_size = train_samples.count/nprocs;
+    size_t chunk_rem = train_samples.count%nprocs;
 
-    // Sample sample = test_samples.items[0];
-    // size_t predicted_class = klassify_sample(train_samples, sample.text, 2);
+    pthread_t *threads = malloc(nprocs*sizeof(pthread_t));
+    assert(threads != NULL);
+    Klassify_State *states = malloc(nprocs*sizeof(Klassify_State));
+    assert(states != NULL);
+    memset(states, 0, nprocs*sizeof(Klassify_State));
 
-    // nob_log(NOB_INFO, "Text: "SV_Fmt, SV_Arg(sample.text));
-    // nob_log(NOB_INFO, "Predicted class: %s", klass_names[predicted_class]);
-    // nob_log(NOB_INFO, "Actual class: %s", klass_names[sample.klass]);
+    for(size_t i=0; i<nprocs; ++i){
+        states[i].train = train_samples.items + i*chunk_size;
+        states[i].train_count = chunk_size;
+        if(i == nprocs - 1)states[i].train_count += chunk_rem;
+        states[i].text = nob_sv_from_cstr(text);
+        if(pthread_create(&threads[i], NULL, klassify_thread, &states[i]) != 0){
+            nob_log(NOB_ERROR, "Could no create thread!");
+            return 1;
+        }
+    }
+
+    for(size_t i=0; i<nprocs; ++i){
+        if(pthread_join(threads[i], NULL) != 0){
+            nob_log(NOB_ERROR, "Could not join thread");
+            return 1;
+        }
+    }
+
+    size_t klass_freq[NOB_ARRAY_LEN(klass_names)] = {0};
+    for(size_t i=0; i<nprocs; ++i){
+        klass_freq[states[i].ncds.items[0].klass] += 1;
+    }
+
+    size_t predicted_klass = 0;
+    for(size_t i=1; i<NOB_ARRAY_LEN(klass_names); ++i){
+        if(klass_freq[predicted_klass] < klass_freq[i]){
+            predicted_klass = i;
+        }
+    }
+
+    nob_log(NOB_INFO, "Text: %s", text);
+    nob_log(NOB_INFO, "Klass: %s", klass_names[predicted_klass]);
 
     return 0;
 }
